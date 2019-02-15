@@ -2,10 +2,12 @@
 
 Path tracking simulation with iterative linear model predictive control for speed and steer control
 
-author: Atsushi Sakai (@Atsushi_twi)
-
+maintainer: Atsushi Sakai (@Atsushi_twi)
+author: Shohei Fujii (@ompugao)
 """
+
 import matplotlib.pyplot as plt
+import copy
 import cvxpy
 import math
 import numpy as np
@@ -20,30 +22,36 @@ try:
 except:
     raise
 
+"""
+u: -2.0 ~ 2.0
+xdiff: ~1.0になってほしい
+v: ~5.0
+"""
+
 NX = 5  # z = x, y, theta, dottheta, v
 NU = 2  # a = [right, left]
 T = 5  # horizon length
 
 # mpc parameters
 R = np.diag([0.01, 0.01])  # input cost matrix
-Rd = np.diag([0.1, 0.1])   # input difference cost matrix
-Q = np.diag([1.0, 1.0, 1.5, 0.5, 0.5])  # state cost matrix
+Rd = np.diag([0.00001, 0.00001])   # input difference cost matrix
+Q = np.diag([10.0, 10.0, 1, 0.5, 15.0])  # state cost matrix
 Qf = Q  # state final matrix
 GOAL_DIS = 1.5  # goal distance
-STOP_SPEED = 0.5 / 3.6  # stop speed
-MAX_TIME = 40.0  # max simulation time
+STOP_SPEED = 0.5  # stop speed
+MAX_TIME = 100.0  # max simulation time
 
 # iterative paramter
 MAX_ITER = 10  # Max iteration
-DU_TH = 0.1  # iteration finish param
+DU_TH = 0.00001  # iteration finish param
 
-TARGET_SPEED = 10.0 / 3.6  # [m/s] target speed
+TARGET_SPEED = 3.0  # [m/s] target speed
 N_IND_SEARCH = 10  # Search index number
 
 DT = 0.2  # [s] time tick
 
 # Vehicle parameters
-LENGTH = 4.5  # [m]
+LENGTH = 2.0  # [m]
 WIDTH = 2.0  # [m]
 # BACKTOWHEEL = 1.0  # [m]
 WHEEL_LEN = 0.3  # [m]
@@ -56,15 +64,15 @@ Iw = 1.0/2 * WHEEL_MASS * WHEEL_RADIUS * WHEEL_RADIUS
 
 MASS = 10.0 # [kg]
 Iv = 1.0/2 * MASS * 0.5 * 0.5
+# Iv = 0.0
 INPUT_GAIN = 1.0
-DAMPING_GAIN = 0.1
-MAX_INPUT = 10
+DAMPING_GAIN = 0.000001
 
 MAX_SPEED = 5  # maximum speed [m/s]
 MIN_SPEED = -2  # minimum speed [m/s]
 
-MAX_MOTOR_SPEED = np.pi * 4  # maximum motor angle [rad]
-MAX_MOTOR_ACCEL = np.pi * 1  # maximum accel [m/ss]
+MAX_MOTOR_TORQUE = np.pi  # maximum motor angle [rad]
+MAX_MOTOR_TORQUE_VEL = np.pi * 0.5  # maximum accel [m/ss]
 show_animation = True
 
 try:
@@ -88,7 +96,6 @@ class State:
     def __repr__(self, ):
         return '<State: x=%s, y=%s, theta=%s, thetadot=%s, v=%s>'%(self.x, self.y, self.theta, self.thetadot, self.v)
 
-@profile
 def pi_2_pi(angle):
     while(angle > math.pi):
         angle = angle - 2.0 * math.pi
@@ -134,8 +141,8 @@ def plot_car(x, y, theta, cabcolor="-r", truckcolor="-k"):  # pragma: no cover
     radius = WIDTH/2.0
     circle = plt.Circle((x, y), radius, facecolor='w', edgecolor='r')
     plt.gcf().gca().add_artist(circle)
-    direction = np.array([[x, x + math.cos(theta) * radius * 2],
-                          [y, y + math.sin(theta) * radius * 2]])
+    direction = np.array([[x, x + math.cos(theta) * radius],
+                          [y, y + math.sin(theta) * radius]])
 
     plt.plot(direction[0], direction[1], truckcolor)
     plt.plot(x, y, "*g")
@@ -143,14 +150,15 @@ def plot_car(x, y, theta, cabcolor="-r", truckcolor="-k"):  # pragma: no cover
 @profile
 def update_state(state, u):
     # input check
-    u[0] = np.clip(u[0], -MAX_INPUT, MAX_INPUT)
-    u[1] = np.clip(u[1], -MAX_INPUT, MAX_INPUT)
+    u_copy = copy.deepcopy(u)
+    u_copy[0] = np.clip(u_copy[0], -MAX_MOTOR_TORQUE, MAX_MOTOR_TORQUE)
+    u_copy[1] = np.clip(u_copy[1], -MAX_MOTOR_TORQUE, MAX_MOTOR_TORQUE)
 
     # state.x = state.x + state.v * math.cos(state.theta) * DT
     # state.y = state.y + state.v * math.sin(state.theta) * DT
     #state.theta = state.theta + state.v / WB * math.tan(delta) * DT
     A, B, C = get_linear_model_matrix(state.v, state.theta)
-    newz = A.dot(np.array([state.x, state.y, state.theta, state.thetadot, state.v]).T) + B.dot(u.T)
+    newz = A.dot(np.array([state.x, state.y, state.theta, state.thetadot, state.v]).T) + B.dot(u_copy.T)
     state.x        = newz[0]
     state.y        = newz[1]
     state.theta    = newz[2]
@@ -217,20 +225,19 @@ def iterative_linear_mpc_control(xref, x0, ou):
     if ou is None:
         ou = np.zeros((2,T))
 
-    #from IPython.terminal import embed; ipshell=embed.InteractiveShellEmbed(config=embed.load_default_config())(local_ns=locals())
-
-    # TODO
-    # x, y in xref is zero somehow
+    cmap = plt.get_cmap("tab10")
     for i in range(MAX_ITER):
         xbar = predict_motion(x0, ou, xref)
         pou_r, pou_l = ou[0, :], ou[1, :]
         ou, ox, oy, otheta, othetadot, ov = linear_mpc_control(xref, xbar, x0)
         du = sum(abs(ou[0, :] - pou_r)) + sum(abs(ou[1, :] - pou_l))  # calc u change value
 
+        plt.plot(ox, oy, color=cmap(i), marker="x", label="iteration")
         if du <= DU_TH:
             break
     else:
         print("Iterative is max iter")
+    print("iteration: %s"%i)
 
     return ou, ox, oy, otheta, othetadot, ov
 
@@ -257,22 +264,21 @@ def linear_mpc_control(xref, xbar, x0):
         if t != 0:
             cost += cvxpy.quad_form(xref[:, t] - x[:, t], Q)
 
-        A, B, C = get_linear_model_matrix(
-            xbar[2, t], xbar[3, t])
+        A, B, C = get_linear_model_matrix(xbar[4, t], xbar[2, t])
         constraints += [x[:, t + 1] == A * x[:, t] + B * u[:, t] + C]
 
         if t < (T - 1):
             cost += cvxpy.quad_form(u[:, t + 1] - u[:, t], Rd)
-            constraints += [cvxpy.abs(u[0, t + 1] - u[0, t]) <= MAX_MOTOR_ACCEL * DT]
-            constraints += [cvxpy.abs(u[1, t + 1] - u[1, t]) <= MAX_MOTOR_ACCEL * DT]
+            # constraints += [cvxpy.abs(u[0, t + 1] - u[0, t]) <= MAX_MOTOR_TORQUE_VEL * DT]
+            # constraints += [cvxpy.abs(u[1, t + 1] - u[1, t]) <= MAX_MOTOR_TORQUE_VEL * DT]
 
     cost += cvxpy.quad_form(xref[:, T] - x[:, T], Qf)
 
     constraints += [x[:, 0] == x0]
     constraints += [x[4, :] <= MAX_SPEED]
     constraints += [x[4, :] >= MIN_SPEED]
-    constraints += [cvxpy.abs(u[0, :]) <= MAX_MOTOR_SPEED]
-    constraints += [cvxpy.abs(u[1, :]) <= MAX_MOTOR_SPEED]
+    constraints += [cvxpy.abs(u[0, :]) <= MAX_MOTOR_TORQUE]
+    constraints += [cvxpy.abs(u[1, :]) <= MAX_MOTOR_TORQUE]
 
     prob = cvxpy.Problem(cvxpy.Minimize(cost), constraints)
     prob.solve(solver=cvxpy.ECOS, verbose=False)
@@ -290,7 +296,7 @@ def linear_mpc_control(xref, xbar, x0):
 
     else:
         print("Error: Cannot solve mpc..")
-        ou, ox, oy, otheta, othetadot, ov = None, None, None, None, None
+        ou, ox, oy, otheta, othetadot, ov = None, None, None, None, None, None
 
     return ou, ox, oy, otheta, othetadot, ov
 
@@ -435,7 +441,6 @@ def do_simulation(cx, cy, ctheta, ck, sp, dl, initial_state):
             # from IPython.terminal import embed; ipshell=embed.InteractiveShellEmbed(config=embed.load_default_config())(local_ns=locals())
 
         if show_animation:  # pragma: no cover
-            plt.cla()
             if ox is not None:
                 plt.plot(ox, oy, "xr", label="MPC")
             plt.plot(cx, cy, "-r", label="course")
@@ -452,6 +457,8 @@ def do_simulation(cx, cy, ctheta, ck, sp, dl, initial_state):
             plt.title("Time[s]:" + str(round(time, 2))
                       + ", speed[m/s]:" + str(round(state.v, 2)))
             plt.pause(0.0001)
+            plt.cla()
+            print(time)
 
     return t, x, y, theta, v, u
 
@@ -540,12 +547,12 @@ def get_forward_course(dl):
 
 @profile
 def get_switch_back_course(dl):
-    ax = [0.0, 30.0, 6.0, 20.0, 35.0]
-    ay = [0.0, 0.0, 20.0, 35.0, 20.0]
+    ax = np.array([0.0, 30.0, 6.0, 20.0, 35.0])/3.0
+    ay = np.array([0.0, 0.0, 20.0, 35.0, 20.0])/3.0
     cx, cy, ctheta, ck, s = cubic_spline_planner.calc_spline_course(
         ax, ay, ds=dl)
-    ax = [35.0, 10.0, 0.0, 0.0]
-    ay = [20.0, 30.0, 5.0, 0.0]
+    ax = np.array([35.0, 10.0, 0.0, 0.0])/3.0
+    ay = np.array([20.0, 30.0, 5.0, 0.0])/3.0
     cx2, cy2, ctheta2, ck2, s2 = cubic_spline_planner.calc_spline_course(
         ax, ay, ds=dl)
     ctheta2 = [i - math.pi for i in ctheta2]
@@ -567,17 +574,17 @@ def get_forward_course_mini(dl):
 def main():
     print(__file__ + " start!!")
 
-    dl = 1.0  # course tick
+    dl = 0.2 # course tick
     # cx, cy, ctheta, ck = get_straight_course(dl)
     # cx, cy, ctheta, ck = get_straight_course2(dl)
     # cx, cy, ctheta, ck = get_straight_course3(dl)
     # cx, cy, ctheta, ck = get_forward_course(dl)
-    # CX, cy, ctheta, ck = get_switch_back_course(dl)
+    # cx, cy, ctheta, ck = get_switch_back_course(dl)
     cx, cy, ctheta, ck = get_forward_course_mini(dl)
 
     sp = calc_speed_profile(cx, cy, ctheta, TARGET_SPEED)
 
-    initial_state = State(x=cx[0], y=cy[0]+1, theta=ctheta[0], v=0.0, thetadot=0.0)
+    initial_state = State(x=cx[0], y=cy[0], theta=ctheta[0], v=0.0, thetadot=0.0)
     #initial_state = State(x=cx[0], y=1.0, theta=0.0, v=0.0, thetadot=0.0)
 
     t, x, y, theta, v, u = do_simulation(
