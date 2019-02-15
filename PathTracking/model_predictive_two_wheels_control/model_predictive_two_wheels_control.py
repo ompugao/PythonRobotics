@@ -35,7 +35,7 @@ T = 5  # horizon length
 # mpc parameters
 R = np.diag([0.01, 0.01])  # input cost matrix
 Rd = np.diag([0.00001, 0.00001])   # input difference cost matrix
-Q = np.diag([10.0, 10.0, 1, 0.5, 15.0])  # state cost matrix
+Q = np.diag([1.0, 1.0, 0.1, 0.0, 15.0])  # state cost matrix
 Qf = Q  # state final matrix
 GOAL_DIS = 1.5  # goal distance
 STOP_SPEED = 0.5  # stop speed
@@ -43,9 +43,9 @@ MAX_TIME = 100.0  # max simulation time
 
 # iterative paramter
 MAX_ITER = 10  # Max iteration
-DU_TH = 0.00001  # iteration finish param
+DU_TH = 0.001  # iteration finish param
 
-TARGET_SPEED = 3.0  # [m/s] target speed
+TARGET_SPEED = 2.0  # [m/s] target speed
 N_IND_SEARCH = 10  # Search index number
 
 DT = 0.2  # [s] time tick
@@ -281,18 +281,19 @@ def linear_mpc_control(xref, xbar, x0):
     constraints += [cvxpy.abs(u[1, :]) <= MAX_MOTOR_TORQUE]
 
     prob = cvxpy.Problem(cvxpy.Minimize(cost), constraints)
-    prob.solve(solver=cvxpy.ECOS, verbose=False)
+    optimal_value = prob.solve(solver=cvxpy.SCS, verbose=True)
+    print("optimal value: ", optimal_value)
 
     ou = np.zeros((NU, T))
 
     if prob.status == cvxpy.OPTIMAL or prob.status == cvxpy.OPTIMAL_INACCURATE:
-        ox = get_nparray_from_matrix(x.value[0, :])
-        oy = get_nparray_from_matrix(x.value[1, :])
-        otheta = get_nparray_from_matrix(x.value[2, :])
-        othetadot = get_nparray_from_matrix(x.value[3, :])
-        ov = get_nparray_from_matrix(x.value[4, :])
-        ou[0,:] = get_nparray_from_matrix(u.value[0, :])
-        ou[1,:] = get_nparray_from_matrix(u.value[1, :])
+        ox = x.value[0, :]
+        oy = x.value[1, :]
+        otheta = x.value[2, :]
+        othetadot = x.value[3, :]
+        ov = x.value[4, :]
+        ou[0,:] = u.value[0, :]
+        ou[1,:] = u.value[1, :]
 
     else:
         print("Error: Cannot solve mpc..")
